@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "research-assistant": {
+      "command": "research-mcp",
+      "args": ["--data-dir", "/absolute/path/to/research-library"],
+      "env": {
+        "RESEARCH_EMBEDDER": "auto",
+        "RESEARCH_ALLOWED_DIRS": "/absolute/path/to/your/pdfs"
+      }
+    }
+  }
+}
