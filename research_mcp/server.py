@@ -8,7 +8,9 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from . import generation
 from .config import Settings
+from .llm import OllamaLLM
 from .service import ResearchLibrary
 
 INSTRUCTIONS = """\
@@ -21,6 +23,8 @@ Typical workflow:
    returned passages and cite them as [cite_key, p. N].
 4. `summarize_paper`, `compare_papers`, `find_citations`, `find_related_papers` for analysis.
 5. `literature_review` to get a themed review scaffold, then write the review from it.
+6. Generation via the server's Ollama model: `ask_papers` (grounded Q&A), `synthesize_comparison`,
+   `write_literature_review`. Check `llm_status` if they fail.
 
 Paper ids look like `arxiv-2106.09685`, `doi-10.1145_...` or `pdf-<hash>`; see `list_papers`.
 """
@@ -28,6 +32,7 @@ Paper ids look like `arxiv-2106.09685`, `doi-10.1145_...` or `pdf-<hash>`; see `
 mcp = FastMCP("research-assistant", instructions=INSTRUCTIONS, stateless_http=True, json_response=True)
 
 _library: ResearchLibrary | None = None
+_llm: OllamaLLM | None = None
 _lock = threading.Lock()
 
 
@@ -43,6 +48,20 @@ def set_library(library: ResearchLibrary | None) -> None:
     """Swap the library (used by tests)."""
     global _library
     _library = library
+
+
+def get_llm() -> OllamaLLM:
+    global _llm
+    with _lock:
+        if _llm is None:
+            _llm = OllamaLLM.from_settings(Settings.from_env())
+        return _llm
+
+
+def set_llm(llm: OllamaLLM | None) -> None:
+    """Swap the LLM client (used by tests)."""
+    global _llm
+    _llm = llm
 
 
 # =========================================================================== discovery & ingestion
@@ -237,6 +256,51 @@ def reindex_library() -> str:
     """Re-embed all chunks with the current embedding model (after changing RESEARCH_EMBEDDER)."""
     n = get_library().reindex()
     return f"Re-embedded {n} chunks with {get_library().embedder.name}"
+
+
+# =========================================================================== LLM generation (Ollama)
+
+
+@mcp.tool()
+def ask_papers(question: str, paper_ids: list[str] | None = None, top_k: int = 8) -> dict:
+    """Answer a research question with the server's Ollama LLM, grounded in retrieved passages.
+
+    Retrieves the most relevant passages (optionally from `paper_ids` only), has the model answer
+    using only those passages with [cite_key, p. N] citations, and returns the answer plus its sources.
+    A `warning` is added if the model cites anything that was not among the sources.
+    """
+    return generation.ask(get_library(), get_llm(), question, paper_ids, max(1, min(top_k, 20)))
+
+
+@mcp.tool()
+def synthesize_comparison(paper_ids: list[str], aspects: list[str] | None = None) -> dict:
+    """Have the Ollama LLM write a comparison table and trade-off analysis from `compare_papers` evidence."""
+    return generation.synthesize_comparison(get_library(), get_llm(), paper_ids, aspects)
+
+
+@mcp.tool()
+def write_literature_review(
+    topic: str,
+    paper_ids: list[str] | None = None,
+    fetch_new: int = 0,
+    n_themes: int = 0,
+    min_year: int = 0,
+) -> dict:
+    """Write a complete literature review (Markdown + BibTeX) with the Ollama LLM.
+
+    Builds the `literature_review` scaffold, then writes the introduction, one section per theme from
+    retrieved evidence, open problems and conclusion. Slow on local models (one LLM call per section).
+    """
+    return generation.write_literature_review(
+        get_library(), get_llm(), topic, paper_ids,
+        fetch_new=max(0, min(fetch_new, 10)), n_themes=max(0, n_themes), min_year=min_year or None,
+    )
+
+
+@mcp.tool()
+def llm_status() -> dict:
+    """Check the Ollama connection: is the server reachable and is the configured model installed?"""
+    return get_llm().health()
 
 
 # =========================================================================== resources

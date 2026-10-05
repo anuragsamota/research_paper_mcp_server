@@ -87,10 +87,15 @@ class SentenceTransformerEmbedder:
 
 
 class OllamaEmbedder:
-    def __init__(self, url: str, model: str = "", timeout: float = 60.0, client: httpx.Client | None = None):
+    def __init__(
+        self, url: str, model: str = "", timeout: float = 60.0, client: httpx.Client | None = None, api_key: str = ""
+    ):
+        from .llm import is_local_url
+
         self.url = url.rstrip("/")
         self.model = model or "nomic-embed-text"
-        self._client = client or httpx.Client(timeout=timeout)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = client or httpx.Client(timeout=timeout, headers=headers, trust_env=not is_local_url(self.url))
         self.name = f"ollama:{self.model}"
         self.dim = len(self._request(["dimension probe"])[0])
 
@@ -123,7 +128,9 @@ def create_embedder(settings: Settings) -> Embedder:
             log.warning("Could not load sentence-transformers model (%s); using the hashing embedder", exc)
         return HashingEmbedder()
     if choice == "ollama":
-        return OllamaEmbedder(settings.ollama_url, settings.embedding_model, settings.http_timeout)
+        return OllamaEmbedder(
+            settings.ollama_url, settings.embedding_model, max(settings.http_timeout, 60.0), api_key=settings.ollama_api_key
+        )
     if choice == "hash":
         return HashingEmbedder()
     raise ValueError(f"Unknown RESEARCH_EMBEDDER {settings.embedder!r} (use auto, hash, sentence-transformers or ollama)")

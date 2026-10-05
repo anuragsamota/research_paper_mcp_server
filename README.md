@@ -1,7 +1,8 @@
 # Research Paper MCP Server
 
-An MCP server that turns any LLM agent (Claude Desktop, Claude Code, IDEs, custom agents) into a
-research assistant. Agents can **search** arXiv and Semantic Scholar, **ingest** papers as PDFs,
+An MCP server that turns any LLM agent (Claude Desktop, Claude Code, IDEs, or the bundled
+**Ollama-powered `research-agent`**) into a research assistant. You can run it fully self-hosted, with
+an **Ollama server on your LAN** providing both the LLM and the embeddings. Agents can **search** arXiv and Semantic Scholar, **ingest** papers as PDFs,
 **retrieve** grounded passages with a semantic search pipeline, and **analyze, compare and review**
 papers. Every passage comes back with a citation like `[Hu2021, p. 4]`.
 
@@ -35,6 +36,7 @@ papers. Every passage comes back with a citation like `[Hu2021, p. 4]`.
 | **Analysis** | Extractive summaries (centrality, cue phrases and MMR de-duplication), TF-IDF keywords, highlights per section, and the limitations the authors state. |
 | **Comparison** | For each aspect (problem, method, data, results, limitations, or any free-text aspect), the best evidence passage from each paper. Also shared and distinctive keywords and a pairwise similarity matrix. |
 | **Citation discovery** | References and citing papers from Semantic Scholar, with influential citations and citation contexts first. Falls back to the reference list parsed from the PDF. Also finds which references are already in your library, and related papers (from your library plus Semantic Scholar recommendations). |
+| **LLM backend (Ollama)** | Uses an Ollama server on this machine, your LAN or Ollama Cloud. The `research-agent` CLI is a tool-calling chat agent driven by your Ollama model. Server-side tools `ask_papers`, `synthesize_comparison` and `write_literature_review` generate cited answers, comparisons and full reviews, and flag any citation that isn't among the retrieved sources. |
 | **Literature review** | Picks relevant papers (and can fetch new ones), clusters them into themes with spherical k-means, labels each theme, and extracts each paper's key contribution. Builds a timeline and a list of research gaps, and outputs evidence passages, a Markdown draft and BibTeX. |
 
 ## Quick start
@@ -46,6 +48,64 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[st]"        # or `pip install -e .` for the lightweight hash embedder only
 research-mcp --help
 ```
+
+## Ollama on your LAN (self-hosted LLM backend)
+
+```
+ laptop / workstation                                  LAN GPU box (e.g. 192.168.1.50)
+┌───────────────────────────────────────┐   HTTP     ┌─────────────────────────────┐
+│ research-agent ─ stdio ─ research-mcp │──────────► │ Ollama :11434               │
+│  (chat loop, tool calls)  (tools,     │ /api/chat  │  • llama3.1:8b / qwen2.5    │
+│                            library)   │ /api/embed │  • nomic-embed-text         │
+└───────────────────────────────────────┘            └─────────────────────────────┘
+```
+
+**1. On the Ollama machine**: listen on the network and pull the models:
+
+```bash
+# Linux (systemd): sudo systemctl edit ollama  → add:
+#   [Service]
+#   Environment="OLLAMA_HOST=0.0.0.0:11434"
+sudo systemctl restart ollama
+# macOS: launchctl setenv OLLAMA_HOST 0.0.0.0:11434 and restart the Ollama app
+# Windows: set the OLLAMA_HOST=0.0.0.0:11434 user environment variable and restart Ollama
+
+ollama pull llama3.1:8b          # chat model with tool calling (or qwen2.5:7b/14b, mistral-nemo, llama3.3)
+ollama pull nomic-embed-text     # embedding model
+```
+
+Allow TCP port 11434 through that machine's firewall for your LAN only. Ollama has no authentication,
+so never expose it to the internet.
+
+**2. On your machine**: point the project at it with a `.env` file in the working directory
+(it's loaded automatically; see [`.env.example`](.env.example)):
+
+```bash
+RESEARCH_OLLAMA_URL=http://192.168.1.50:11434
+RESEARCH_LLM_MODEL=llama3.1:8b
+RESEARCH_EMBEDDER=ollama
+RESEARCH_EMBEDDING_MODEL=nomic-embed-text
+```
+
+**3. Chat with your papers:**
+
+```bash
+research-agent                                   # interactive; spawns the MCP server automatically
+research-agent "Find 3 recent papers on LoRA, add them, and compare their methods"
+research-agent --ollama-url http://192.168.1.50:11434 --model qwen2.5:14b    # one-off overrides
+research-agent --server-url http://server:8000/mcp --token change-me         # use a shared HTTP server
+```
+
+The agent checks at startup that Ollama is reachable and the model is installed, then prints each tool it calls
+(`→ semantic_search({...})`). In-chat commands: `/tools`, `/reset`, `/quit`.
+
+**Tips**
+- Pick a model that supports tool calling. `llama3.1:8b` and `qwen2.5:7b` work on 8 GB of VRAM; `qwen2.5:14b`
+  or larger follow multi-step plans more reliably.
+- `RESEARCH_LLM_NUM_CTX` (default 8192) sets the context window. Raise it if the GPU has room.
+- Use `RESEARCH_LLM_URL` to run the LLM on a different host from the embeddings.
+- Requests to LAN and localhost Ollama addresses skip any `HTTP(S)_PROXY` set in the environment.
+- Changing the embedding model triggers a one-time re-index of the library.
 
 ### Use with Claude Desktop
 
@@ -112,6 +172,10 @@ docker run -p 8000:8000 -e RESEARCH_API_TOKEN=change-me -v research-data:/data r
 | `find_related_papers(paper_id)` | Similar papers in the library and from Semantic Scholar |
 | `literature_review(topic, paper_ids, fetch_new, n_themes, min_year)` | Automated literature review scaffold |
 | `export_bibtex(paper_ids)` | BibTeX entries |
+| `ask_papers(question, paper_ids, top_k)` | **Ollama:** grounded answer with citations and sources |
+| `synthesize_comparison(paper_ids, aspects)` | **Ollama:** comparison table and trade-off analysis |
+| `write_literature_review(topic, …)` | **Ollama:** full review (intro, one section per theme, open problems, conclusion, BibTeX) |
+| `llm_status()` | Check the Ollama connection and model |
 | `library_stats()` / `reindex_library()` | Library status and re-embedding |
 
 ### Resources
@@ -132,10 +196,15 @@ docker run -p 8000:8000 -e RESEARCH_API_TOKEN=change-me -v research-data:/data r
 
 | Variable | Default | Description |
 |---|---|---|
+| `RESEARCH_ENV_FILE` | `./.env` | Settings file loaded at startup (real environment variables win) |
 | `RESEARCH_DATA_DIR` | `./data` | Where the SQLite library, PDFs and `inbox/` live |
 | `RESEARCH_EMBEDDER` | `auto` | `auto` (sentence-transformers if installed, otherwise hash), `hash`, `sentence-transformers` or `ollama` |
 | `RESEARCH_EMBEDDING_MODEL` | backend default | e.g. `BAAI/bge-small-en-v1.5`, `nomic-embed-text` |
-| `RESEARCH_OLLAMA_URL` | `http://localhost:11434` | Ollama server used for embeddings |
+| `RESEARCH_OLLAMA_URL` | `http://localhost:11434` | Ollama server (LLM and embeddings), e.g. `http://192.168.1.50:11434` |
+| `RESEARCH_LLM_MODEL` | `llama3.1:8b` | Ollama chat model used by `research-agent` and the generation tools |
+| `RESEARCH_LLM_URL` | `RESEARCH_OLLAMA_URL` | A separate Ollama host for the LLM |
+| `RESEARCH_LLM_NUM_CTX` / `RESEARCH_LLM_TEMPERATURE` / `RESEARCH_LLM_TIMEOUT` | `8192` / `0.2` / `300` | Generation options |
+| `OLLAMA_API_KEY` | none | Only for Ollama Cloud or an authenticating reverse proxy |
 | `RESEARCH_CHUNK_SIZE` / `RESEARCH_CHUNK_OVERLAP` | `220` / `40` | Chunk size and overlap, in words |
 | `RESEARCH_ALLOWED_DIRS` | `<data>/inbox` | Folders that `ingest_pdf` may read from (separated by `os.pathsep`) |
 | `RESEARCH_MAX_PDF_MB` | `50` | Maximum PDF size for downloads and local files |
@@ -163,7 +232,7 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-The tests generate synthetic paper PDFs and mock arXiv and Semantic Scholar, so they run offline.
+The tests generate synthetic paper PDFs and mock arXiv, Semantic Scholar and Ollama, so they run offline.
 
 ### Project layout
 
@@ -178,4 +247,7 @@ research_mcp/
   sources.py     arXiv and Semantic Scholar clients, PDF download
   store.py       SQLite persistence
   http_app.py    Streamable HTTP app with token auth
+  llm.py         Ollama client (chat + tool calling, health check, LAN-aware)
+  generation.py  grounded Q&A, comparison synthesis, full literature reviews
+  agent.py       research-agent CLI: Ollama tool-calling loop over the MCP tools
 ```

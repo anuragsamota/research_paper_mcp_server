@@ -20,6 +20,7 @@ dev = ["pytest>=8", "reportlab>=4.0"]
 
 [project.scripts]
 research-mcp = "research_mcp.__main__:main"
+research-agent = "research_mcp.agent:main"
 
 [build-system]
 requires = ["setuptools>=68"]
